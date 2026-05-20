@@ -5,16 +5,20 @@ import { ImapFlow } from 'npm:imapflow@1.0.164';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type, x-cron-secret',
+  'Access-Control-Allow-Headers':
+    'authorization, x-client-info, apikey, content-type, x-cron-secret',
   'Access-Control-Allow-Methods': 'POST, OPTIONS',
 };
 
-const CONNECTION_ALERT_INTERVAL_MS = 60 * 60 * 1000; // 1 hour between connection-failure alerts
+const CONNECTION_ALERT_INTERVAL_MS = 0;
 
 function jsonResponse(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), {
     status,
-    headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+    headers: {
+      ...corsHeaders,
+      'Content-Type': 'application/json',
+    },
   });
 }
 
@@ -53,50 +57,99 @@ async function getAccessToken(mb: Mailbox): Promise<string> {
     client_id: mb.client_id,
     grant_type: 'refresh_token',
     refresh_token: mb.refresh_token,
-    scope: 'offline_access https://outlook.office.com/IMAP.AccessAsUser.All',
+    scope:
+      'offline_access https://outlook.office.com/IMAP.AccessAsUser.All',
   });
+
   const res = await fetch(
     `https://login.microsoftonline.com/${mb.tenant_id}/oauth2/v2.0/token`,
     {
       method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+      },
       body: params.toString(),
     }
   );
+
   const data = await res.json();
+
   if (!res.ok || !data.access_token) {
-    throw new Error(data.error_description || data.error || 'Token exchange failed');
+    throw new Error(
+      data.error_description ||
+      data.error ||
+      'Token exchange failed'
+    );
   }
+
   return data.access_token;
 }
 
-async function findStaleEmails(mb: Mailbox, accessToken: string): Promise<StaleEmail[]> {
+async function findStaleEmails(
+  mb: Mailbox,
+  accessToken: string
+): Promise<StaleEmail[]> {
   const client = new ImapFlow({
     host: mb.imap_host,
     port: mb.imap_port,
     secure: true,
-    auth: { user: mb.email, accessToken },
+    auth: {
+      user: mb.email,
+      accessToken,
+    },
     logger: false,
   });
+
   const stale: StaleEmail[] = [];
+
   try {
     await client.connect();
+
     const lock = await client.getMailboxLock('INBOX');
+
     try {
-      const cutoff = new Date(Date.now() - mb.stale_threshold_minutes * 60 * 1000);
-      const beforeDate = new Date(cutoff.getTime() + 24 * 60 * 60 * 1000);
-      const messages = client.fetch(
-        { since: '01-Jan-2000', before: beforeDate.toUTCString().split(' ').slice(1, 4).join('-') },
-        { envelope: true, internalDate: true }
+      const cutoff = new Date(
+        Date.now() - mb.stale_threshold_minutes * 60 * 1000
       );
+
+      const beforeDate = new Date(
+        cutoff.getTime() + 24 * 60 * 60 * 1000
+      );
+
+      const messages = client.fetch(
+        {
+          since: '01-Jan-2000',
+          before: beforeDate
+            .toUTCString()
+            .split(' ')
+            .slice(1, 4)
+            .join('-'),
+        },
+        {
+          envelope: true,
+          internalDate: true,
+        }
+      );
+
       for await (const msg of messages) {
-        const date = msg.internalDate || (msg.envelope?.date ? new Date(msg.envelope.date) : null);
+        const date =
+          msg.internalDate ||
+          (msg.envelope?.date
+            ? new Date(msg.envelope.date)
+            : null);
+
         if (!date) continue;
-        const ageMinutes = Math.floor((Date.now() - new Date(date).getTime()) / 60000);
+
+        const ageMinutes = Math.floor(
+          (Date.now() - new Date(date).getTime()) / 60000
+        );
+
         if (ageMinutes >= mb.stale_threshold_minutes) {
           stale.push({
             subject: msg.envelope?.subject || '(no subject)',
-            from: msg.envelope?.from?.[0]?.address || '(unknown)',
+            from:
+              msg.envelope?.from?.[0]?.address ||
+              '(unknown)',
             date: new Date(date),
             ageMinutes,
           });
@@ -108,71 +161,280 @@ async function findStaleEmails(mb: Mailbox, accessToken: string): Promise<StaleE
   } finally {
     await client.logout().catch(() => {});
   }
+
   return stale;
 }
 
 function escapeHtml(s: string): string {
-  return s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]!));
+  return s.replace(/[&<>"']/g, (c) =>
+    ({
+      '&': '&amp;',
+      '<': '&lt;',
+      '>': '&gt;',
+      '"': '&quot;',
+      "'": '&#39;',
+    }[c]!)
+  );
 }
 
-function buildStaleEmailHtml(mb: Mailbox, stale: StaleEmail[]): string {
-  const sample = stale.slice(0, 5);
-  const sampleRows = sample.map(s => `
-    <tr>
-      <td style="padding: 6px 8px; border-bottom: 1px solid #e2e8f0;">${escapeHtml(s.subject)}</td>
-      <td style="padding: 6px 8px; border-bottom: 1px solid #e2e8f0; color: #64748b;">${escapeHtml(s.from)}</td>
-      <td style="padding: 6px 8px; border-bottom: 1px solid #e2e8f0; color: #dc2626; white-space: nowrap;">${s.ageMinutes} min</td>
-    </tr>
-  `).join('');
-  const remaining = stale.length > 5 ? `<p style="color: #64748b; font-size: 13px;">…and ${stale.length - 5} more.</p>` : '';
+function emailShell(
+  headerColor: string,
+  headerLabel: string,
+  mailboxEmail: string,
+  body: string
+): string {
+  const now = new Date().toLocaleString('en-GB', {
+    day: '2-digit',
+    month: 'short',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    timeZone: 'UTC',
+    timeZoneName: 'short',
+  });
+
   return `
-    <div style="font-family: -apple-system, Segoe UI, Roboto, sans-serif; max-width: 640px; margin: 0 auto;">
-      <div style="background: #dc2626; color: white; padding: 20px; border-radius: 8px 8px 0 0;">
-        <h2 style="margin: 0;">⚠ Stale Mail Detected</h2>
-        <p style="margin: 4px 0 0 0; opacity: 0.95;">FlowSentinel — ${escapeHtml(mb.email)}</p>
-      </div>
-      <div style="padding: 24px; background: #f8fafc; border: 1px solid #e2e8f0; border-top: none; border-radius: 0 0 8px 8px;">
-        <p><strong>${stale.length}</strong> email${stale.length > 1 ? 's' : ''} in this mailbox ${stale.length > 1 ? 'have' : 'has'} been waiting longer than the <strong>${mb.stale_threshold_minutes}-minute</strong> threshold.</p>
-        <p style="color: #64748b; font-size: 13px;">ReadSoft normally processes incoming mail and moves it out of Inbox. Stale mail typically means ReadSoft is not running, has stopped processing this mailbox, or is unable to authenticate.</p>
-        <table style="width: 100%; margin: 16px 0; border-collapse: collapse; font-size: 13px;">
-          <thead><tr style="background: #e2e8f0;"><th style="padding: 8px; text-align: left;">Subject</th><th style="padding: 8px; text-align: left;">From</th><th style="padding: 8px; text-align: left;">Age</th></tr></thead>
-          <tbody>${sampleRows}</tbody>
-        </table>
-        ${remaining}
-      </div>
-    </div>
-  `;
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+</head>
+<body style="margin:0;padding:0;background:#f1f5f9;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;">
+<table width="100%" cellpadding="0" cellspacing="0" style="background:#f1f5f9;padding:32px 16px;">
+<tr>
+<td align="center">
+<table width="620" cellpadding="0" cellspacing="0" style="max-width:620px;width:100%;">
+
+<tr>
+<td style="background:${headerColor};border-radius:8px 8px 0 0;padding:0;">
+<table width="100%" cellpadding="0" cellspacing="0">
+<tr>
+<td style="padding:20px 28px;">
+<p style="margin:0;font-size:11px;font-weight:600;letter-spacing:2px;text-transform:uppercase;color:rgba(255,255,255,0.7);">
+FlowSentinel Alert
+</p>
+
+<p style="margin:6px 0 0 0;font-size:20px;font-weight:700;color:#ffffff;">
+${headerLabel}
+</p>
+
+<p style="margin:4px 0 0 0;font-size:13px;color:rgba(255,255,255,0.85);">
+${escapeHtml(mailboxEmail)}
+</p>
+</td>
+
+<td style="padding:20px 28px 20px 0;text-align:right;vertical-align:top;">
+<span style="display:inline-block;background:rgba(255,255,255,0.15);border:1px solid rgba(255,255,255,0.35);border-radius:20px;padding:4px 14px;font-size:11px;font-weight:700;color:#fff;letter-spacing:1.5px;text-transform:uppercase;">
+URGENT
+</span>
+</td>
+</tr>
+</table>
+</td>
+</tr>
+
+<tr>
+<td style="background:#ffffff;padding:32px 28px;border-left:1px solid #e2e8f0;border-right:1px solid #e2e8f0;">
+${body}
+</td>
+</tr>
+
+<tr>
+<td style="background:#f8fafc;border:1px solid #e2e8f0;border-top:none;border-radius:0 0 8px 8px;padding:20px 28px;">
+<table width="100%" cellpadding="0" cellspacing="0">
+<tr>
+<td>
+<p style="margin:0;font-size:13px;font-weight:600;color:#1e293b;">
+Team FlowSentinel
+</p>
+
+<p style="margin:2px 0 0 0;font-size:11px;color:#94a3b8;">
+flowsentinel.cloud · Automated Workflow Monitoring
+</p>
+</td>
+
+<td style="text-align:right;vertical-align:middle;">
+<p style="margin:0;font-size:11px;color:#cbd5e1;">
+${now}
+</p>
+</td>
+</tr>
+</table>
+</td>
+</tr>
+
+</table>
+</td>
+</tr>
+</table>
+</body>
+</html>
+`;
 }
 
-function buildConnectionFailureHtml(mb: Mailbox, errorMessage: string): string {
-  const looksLikeAuth = /invalid_grant|AADSTS|AUTHENTICATE|unauthorized|expired/i.test(errorMessage);
-  return `
-    <div style="font-family: -apple-system, Segoe UI, Roboto, sans-serif; max-width: 640px; margin: 0 auto;">
-      <div style="background: #b91c1c; color: white; padding: 20px; border-radius: 8px 8px 0 0;">
-        <h2 style="margin: 0;">⚠ Mailbox Connection Failed</h2>
-        <p style="margin: 4px 0 0 0; opacity: 0.95;">FlowSentinel — ${escapeHtml(mb.email)}</p>
-      </div>
-      <div style="padding: 24px; background: #f8fafc; border: 1px solid #e2e8f0; border-top: none; border-radius: 0 0 8px 8px;">
-        <p>FlowSentinel was unable to connect to this mailbox during its periodic check.</p>
-        ${looksLikeAuth ? `
-          <div style="background: #fef3c7; border-left: 4px solid #f59e0b; padding: 12px; margin: 16px 0;">
-            <strong>This looks like an authentication issue.</strong> The refresh token may have expired or been revoked.
-            <br><br>
-            <strong>Action:</strong> Open FlowSentinel, click <strong>Regenerate</strong> on this mailbox, then update both ReadSoft's backend config and this app's saved token with the new value.
-          </div>
-        ` : `
-          <p style="color: #64748b; font-size: 13px;">This may be a transient network issue. The system will retry automatically every 5 minutes.</p>
-        `}
-        <div style="background: #f1f5f9; border: 1px solid #e2e8f0; padding: 12px; border-radius: 6px; margin-top: 16px;">
-          <p style="margin: 0; font-size: 12px; color: #64748b;">Error details:</p>
-          <code style="font-family: monospace; font-size: 12px; color: #1e293b; word-break: break-all;">${escapeHtml(errorMessage)}</code>
-        </div>
-        <p style="margin-top: 20px; font-size: 12px; color: #64748b;">
-          You will receive this alert at most once per hour while the connection remains broken.
-        </p>
-      </div>
-    </div>
-  `;
+function buildStaleEmailHtml(
+  mb: Mailbox,
+  stale: StaleEmail[]
+): string {
+  const sample = stale[0];
+
+  const arrivedAt = sample.date.toLocaleString('en-GB', {
+    day: '2-digit',
+    month: 'short',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    timeZone: 'UTC',
+    timeZoneName: 'short',
+  });
+
+  const moreNote =
+    stale.length > 1
+      ? `
+<p style="margin:16px 0 0 0;font-size:13px;color:#64748b;line-height:1.6;">
+There may be more emails older than the
+<strong>${mb.stale_threshold_minutes}-minute threshold</strong>
+in this mailbox.
+</p>
+`
+      : '';
+
+  const body = `
+<p style="margin:0 0 6px 0;font-size:15px;color:#1e293b;">
+Hi Team,
+</p>
+
+<p style="margin:0 0 20px 0;font-size:14px;color:#475569;line-height:1.7;">
+Stale mail has been detected for the mailbox
+<strong>${escapeHtml(mb.email)}</strong>.
+Your immediate attention is required.
+</p>
+
+<p style="margin:0 0 8px 0;font-size:12px;font-weight:600;letter-spacing:1px;text-transform:uppercase;color:#94a3b8;">
+Example of stale email detected
+</p>
+
+<table width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #e2e8f0;border-radius:6px;border-collapse:collapse;">
+<thead>
+<tr style="background:#f1f5f9;">
+<th style="padding:10px 12px;text-align:left;font-size:11px;color:#64748b;">
+Subject
+</th>
+
+<th style="padding:10px 12px;text-align:left;font-size:11px;color:#64748b;">
+Arrived At
+</th>
+
+<th style="padding:10px 12px;text-align:left;font-size:11px;color:#64748b;">
+Threshold
+</th>
+</tr>
+</thead>
+
+<tbody>
+<tr>
+<td style="padding:12px;font-size:13px;color:#1e293b;">
+${escapeHtml(sample.subject)}
+</td>
+
+<td style="padding:12px;font-size:13px;color:#1e293b;white-space:nowrap;">
+${arrivedAt}
+</td>
+
+<td style="padding:12px;font-size:13px;color:#1e293b;white-space:nowrap;">
+${mb.stale_threshold_minutes} min
+</td>
+</tr>
+</tbody>
+</table>
+
+${moreNote}
+
+<p style="margin:20px 0 0 0;font-size:14px;color:#475569;line-height:1.7;">
+Kindly check if <strong>Mobile Approval</strong> is working from the ReadSoft side.
+</p>
+
+<table cellpadding="0" cellspacing="0" style="margin-top:24px;width:100%;">
+<tr>
+<td style="background:#f0fdf4;border-left:4px solid #22c55e;border-radius:0 6px 6px 0;padding:12px 16px;">
+<p style="margin:0;font-size:13px;color:#166534;line-height:1.6;">
+<strong>Recommended action:</strong>
+Check the ReadSoft Mobile Approval runtime on your Tomcat or NetWeaver server.
+If the service appears running but emails are not being processed, a restart may be required.
+</p>
+</td>
+</tr>
+</table>
+`;
+
+  return emailShell(
+    '#dc2626',
+    'Stale Mail Detected',
+    mb.email,
+    body
+  );
+}
+
+function buildConnectionFailureHtml(
+  mb: Mailbox,
+  errorMessage: string
+): string {
+  const looksLikeAuth =
+    /invalid_grant|AADSTS|AUTHENTICATE|unauthorized|expired/i.test(
+      errorMessage
+    );
+
+  const authHighlight = looksLikeAuth
+    ? `
+<table cellpadding="0" cellspacing="0" style="margin:20px 0;width:100%;">
+<tr>
+<td style="background:#fffbeb;border-left:4px solid #f59e0b;border-radius:0 6px 6px 0;padding:12px 16px;">
+<p style="margin:0;font-size:13px;color:#92400e;line-height:1.6;">
+<strong>Authentication issue detected.</strong>
+The OAuth refresh token for this mailbox appears to have expired or been revoked.
+The refresh token must be regenerated manually and updated in FlowSentinel.
+</p>
+</td>
+</tr>
+</table>
+`
+    : '';
+
+  const body = `
+<p style="margin:0 0 6px 0;font-size:15px;color:#1e293b;">
+Hi Team,
+</p>
+
+<p style="margin:0 0 24px 0;font-size:14px;color:#475569;line-height:1.7;">
+The application failed to connect to mailbox
+<strong>${escapeHtml(mb.email)}</strong>.
+Immediate action is required.
+</p>
+
+${authHighlight}
+
+<p style="margin:0 0 10px 0;font-size:12px;font-weight:600;letter-spacing:1px;text-transform:uppercase;color:#94a3b8;">
+Error Detail
+</p>
+
+<div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:6px;padding:12px 16px;">
+<code style="font-family:'Courier New',Courier,monospace;font-size:12px;color:#1e293b;word-break:break-all;line-height:1.6;">
+${escapeHtml(errorMessage)}
+</code>
+</div>
+
+<p style="margin:20px 0 0 0;font-size:12px;color:#94a3b8;line-height:1.6;">
+This alert is sent on every monitoring check until connection is restored.
+</p>
+`;
+
+  return emailShell(
+    '#b91c1c',
+    'Mailbox Connection Failed',
+    mb.email,
+    body
+  );
 }
 
 async function buildTransporter(smtp: SmtpConfig) {
@@ -181,21 +443,40 @@ async function buildTransporter(smtp: SmtpConfig) {
     port: smtp.port,
     secure: smtp.port === 465,
     requireTLS: smtp.port === 587,
-    tls: { rejectUnauthorized: true, minVersion: 'TLSv1.2' },
+    tls: {
+      rejectUnauthorized: true,
+      minVersion: 'TLSv1.2',
+    },
   };
+
   if (smtp.username && smtp.password) {
-    config.auth = { user: smtp.username, pass: smtp.password };
+    config.auth = {
+      user: smtp.username,
+      pass: smtp.password,
+    };
   }
+
   return nodemailer.createTransport(config);
 }
 
 Deno.serve(async (req) => {
-  if (req.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders });
+  if (req.method === 'OPTIONS') {
+    return new Response('ok', {
+      headers: corsHeaders,
+    });
+  }
 
   const cronSecret = req.headers.get('x-cron-secret');
   const expectedSecret = Deno.env.get('CRON_SECRET');
+
   if (!expectedSecret || cronSecret !== expectedSecret) {
-    return jsonResponse({ success: false, error: 'Unauthorized' }, 401);
+    return jsonResponse(
+      {
+        success: false,
+        error: 'Unauthorized',
+      },
+      401
+    );
   }
 
   const adminClient = createClient(
@@ -203,22 +484,18 @@ Deno.serve(async (req) => {
     Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
   );
 
-  // ── License check ─────────────────────────────────────────────────────────
-const { data: licConfig } = await adminClient
-  .from('license_config')
-  .select('expires_at')
-  .eq('id', 1)
-  .maybeSingle();
+  const { data: licConfig } = await adminClient
+    .from('license_config')
+    .select('expires_at')
+    .eq('id', 1)
+    .maybeSingle();
 
-if (!licConfig || new Date(licConfig.expires_at) < new Date()) {
-  console.warn('License expired or not configured — monitoring paused');
-  return jsonResponse({
-    success: false,
-    error: 'License expired. Monitoring paused.',
-    summary: { checked: 0, reason: 'license_expired' },
-  });
-}
-// ─────────────────────────────────────────────────────────────────────────
+  if (!licConfig || new Date(licConfig.expires_at) < new Date()) {
+    return jsonResponse({
+      success: false,
+      error: 'License expired',
+    });
+  }
 
   const summary = {
     checked: 0,
@@ -226,7 +503,6 @@ if (!licConfig || new Date(licConfig.expires_at) < new Date()) {
     stale_alerts_sent: 0,
     connection_failures: 0,
     connection_alerts_sent: 0,
-    skipped_throttled: 0,
     skipped_no_recipients: 0,
     errors: [] as string[],
   };
@@ -236,23 +512,44 @@ if (!licConfig || new Date(licConfig.expires_at) < new Date()) {
       .from('mailboxes')
       .select('*')
       .eq('alerts_enabled', true);
-    if (mbErr) throw new Error(`Mailbox query failed: ${mbErr.message}`);
-    if (!mailboxes || mailboxes.length === 0) return jsonResponse({ success: true, summary });
+
+    if (mbErr) {
+      throw new Error(mbErr.message);
+    }
+
+    if (!mailboxes?.length) {
+      return jsonResponse({
+        success: true,
+        summary,
+      });
+    }
 
     summary.checked = mailboxes.length;
 
     let smtp: SmtpConfig | null = null;
     let transporter: any = null;
+
     const ensureTransporter = async () => {
       if (transporter) return;
-      const { data } = await adminClient.from('smtp_config').select('*').eq('id', 1).single();
-      if (!data) throw new Error('SMTP not configured');
+
+      const { data } = await adminClient
+        .from('smtp_config')
+        .select('*')
+        .eq('id', 1)
+        .single();
+
+      if (!data) {
+        throw new Error('SMTP not configured');
+      }
+
       smtp = data;
       transporter = await buildTransporter(smtp);
     };
 
-    for (const mb of mailboxes as Mailbox[]) {
-      const updates: any = { last_sync_at: new Date().toISOString() };
+        for (const mb of mailboxes as Mailbox[]) {
+      const updates: any = {
+        last_sync_at: new Date().toISOString(),
+      };
 
       try {
         const accessToken = await getAccessToken(mb);
@@ -263,101 +560,164 @@ if (!licConfig || new Date(licConfig.expires_at) < new Date()) {
         updates.last_error = null;
 
         if (stale.length === 0) {
-          await adminClient.from('mailboxes').update(updates).eq('id', mb.id);
+          await adminClient
+            .from('mailboxes')
+            .update(updates)
+            .eq('id', mb.id);
+
           continue;
         }
 
         summary.stale_found++;
-        const lastAlert = mb.last_stale_alert_at ? new Date(mb.last_stale_alert_at).getTime() : 0;
-        const minIntervalMs = mb.stale_threshold_minutes * 60 * 1000;
-        if (Date.now() - lastAlert < minIntervalMs) {
-          summary.skipped_throttled++;
-          await adminClient.from('mailboxes').update(updates).eq('id', mb.id);
-          continue;
-        }
+
+        // NO THROTTLING FOR STALE MAIL
+        // alert on every cron run if stale emails exist
 
         const { data: recipients } = await adminClient
-          .from('notification_recipients').select('email').eq('mailbox_id', mb.id);
-        const emails = (recipients || []).map(r => r.email);
-        if (emails.length === 0) {
+          .from('notification_recipients')
+          .select('email')
+          .eq('mailbox_id', mb.id);
+
+        const emails = (recipients || []).map((r) => r.email);
+
+        if (!emails.length) {
           summary.skipped_no_recipients++;
-          await adminClient.from('mailboxes').update(updates).eq('id', mb.id);
+
+          await adminClient
+            .from('mailboxes')
+            .update(updates)
+            .eq('id', mb.id);
+
           continue;
         }
 
         await ensureTransporter();
-        const subject = `[FlowSentinel] Stale mail in ${mb.email} (${stale.length} item${stale.length > 1 ? 's' : ''})`;
+
+        const subject = `[FlowSentinel] Stale Mail Detected - ${mb.email}`;
+
         await transporter.sendMail({
           from: `"${smtp!.from_name}" <${smtp!.from_email}>`,
           to: emails.join(','),
           subject,
           html: buildStaleEmailHtml(mb, stale),
+
+          priority: 'high',
+
+          headers: {
+            'X-Priority': '1',
+            'X-MSMail-Priority': 'High',
+            Importance: 'high',
+          },
         });
+
         await adminClient.from('alert_history').insert({
-          mailbox_id: mb.id, alert_type: 'stale_mail', recipients: emails, subject, success: true,
+          mailbox_id: mb.id,
+          alert_type: 'stale_mail',
+          recipients: emails,
+          subject,
+          success: true,
         });
+
         updates.last_stale_alert_at = new Date().toISOString();
-        await adminClient.from('mailboxes').update(updates).eq('id', mb.id);
+
+        await adminClient
+          .from('mailboxes')
+          .update(updates)
+          .eq('id', mb.id);
+
         summary.stale_alerts_sent++;
+
       } catch (err) {
-        // Connection or authentication failure
         const msg = (err as Error).message;
+
         summary.connection_failures++;
         summary.errors.push(`${mb.email}: ${msg}`);
 
         updates.status = 'error';
         updates.last_error = msg;
 
-        // Throttle connection alerts to once per hour
-        const lastConnAlert = mb.last_connection_alert_at ? new Date(mb.last_connection_alert_at).getTime() : 0;
-        const shouldAlert = Date.now() - lastConnAlert >= CONNECTION_ALERT_INTERVAL_MS;
+        const lastConnAlert = mb.last_connection_alert_at
+          ? new Date(mb.last_connection_alert_at).getTime()
+          : 0;
+
+        const shouldAlert =
+          Date.now() - lastConnAlert >= CONNECTION_ALERT_INTERVAL_MS;
 
         if (shouldAlert) {
           try {
             const { data: recipients } = await adminClient
-              .from('notification_recipients').select('email').eq('mailbox_id', mb.id);
-            const emails = (recipients || []).map(r => r.email);
+              .from('notification_recipients')
+              .select('email')
+              .eq('mailbox_id', mb.id);
+
+            const emails = (recipients || []).map((r) => r.email);
 
             if (emails.length > 0) {
               await ensureTransporter();
-              const subject = `[FlowSentinel] Connection failed: ${mb.email}`;
+
+              const subject =
+                `[FlowSentinel] Immediate Action Required - ${mb.email} connection is not working`;
+
               await transporter.sendMail({
                 from: `"${smtp!.from_name}" <${smtp!.from_email}>`,
                 to: emails.join(','),
                 subject,
                 html: buildConnectionFailureHtml(mb, msg),
+
+                priority: 'high',
+
+                headers: {
+                  'X-Priority': '1',
+                  'X-MSMail-Priority': 'High',
+                  Importance: 'high',
+                },
               });
+
               await adminClient.from('alert_history').insert({
                 mailbox_id: mb.id,
-                alert_type: 'stale_mail', // re-using existing enum value (or add a new one — see note)
+                alert_type: 'connection_failure',
                 recipients: emails,
                 subject,
                 success: true,
               });
-              updates.last_connection_alert_at = new Date().toISOString();
+
+              updates.last_connection_alert_at =
+                new Date().toISOString();
+
               summary.connection_alerts_sent++;
             }
           } catch (sendErr) {
-            // Failed to send the failure-alert email — log and move on
             await adminClient.from('alert_history').insert({
               mailbox_id: mb.id,
-              alert_type: 'stale_mail',
+              alert_type: 'connection_failure',
               recipients: [],
               subject: 'connection failure alert send failed',
               success: false,
               error_message: (sendErr as Error).message,
             });
           }
-        } else {
-          summary.skipped_throttled++;
         }
 
-        await adminClient.from('mailboxes').update(updates).eq('id', mb.id);
+        await adminClient
+          .from('mailboxes')
+          .update(updates)
+          .eq('id', mb.id);
       }
     }
 
-    return jsonResponse({ success: true, summary });
+    return jsonResponse({
+      success: true,
+      summary,
+    });
+
   } catch (err) {
-    return jsonResponse({ success: false, error: (err as Error).message, summary }, 500);
+    return jsonResponse(
+      {
+        success: false,
+        error: (err as Error).message,
+        summary,
+      },
+      500
+    );
   }
 });
