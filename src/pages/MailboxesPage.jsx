@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import {
   Plus, Mail, Bell, Key, Trash2,
-  RefreshCw, CheckCircle, Edit2, AlertTriangle, X,
+  RefreshCw, CheckCircle, Edit2, AlertTriangle, X,Inbox,
 } from 'lucide-react';
 import { useAuth } from '../lib/AuthContext';
 import Badge from '../components/Badge';
@@ -10,6 +10,7 @@ import AddMailboxModal from '../components/AddMailboxModal';
 import RegenerateTokenModal from '../components/RegenerateTokenModal';
 import AlertConfigModal from '../components/AlertConfigModal';
 import { validateMailbox } from '../lib/edgeFunctions';
+import InboxViewerModal from '../components/InboxViewerModal';
 
 export default function MailboxesPage() {
   const { supabase } = useAuth();
@@ -19,6 +20,7 @@ export default function MailboxesPage() {
   const [editFor, setEditFor]     = useState(null);
   const [regenFor, setRegenFor]   = useState(null);
   const [alertFor, setAlertFor]   = useState(null);
+  const [inboxFor, setInboxFor] = useState(null);
 
   // Confirm modals
   const [deleteTarget, setDeleteTarget]     = useState(null);
@@ -217,6 +219,14 @@ export default function MailboxesPage() {
                   title="Regenerate token">
                   <Key size={13} /> Regen
                 </button>
+
+                <button
+  onClick={() => setInboxFor(mb)}
+  className="px-3 py-2 hover:bg-indigo-50 dark:hover:bg-indigo-900/20 text-slate-500 dark:text-slate-400 hover:text-indigo-600 dark:hover:text-indigo-400 rounded-lg"
+  title="View inbox">
+  <Inbox size={15} />
+</button>
+                
                 <button onClick={() => setEditFor(mb)}
                   className="px-3 py-2 hover:bg-slate-100 dark:hover:bg-slate-700 text-slate-500 dark:text-slate-400 rounded-lg"
                   title="Edit mailbox">
@@ -366,6 +376,12 @@ export default function MailboxesPage() {
       {editFor  && <AddMailboxModal existing={editFor} onClose={() => setEditFor(null)} onCreated={load} />}
       {regenFor && <RegenerateTokenModal mailbox={regenFor} onClose={() => setRegenFor(null)} onSuccess={load} />}
       {alertFor && <AlertConfigModal mailbox={alertFor} onClose={() => setAlertFor(null)} onSaved={load} />}
+        {inboxFor && (
+  <InboxViewerModal
+    mailbox={inboxFor}
+    onClose={() => setInboxFor(null)}
+  />
+)}
     </div>
   );
 }

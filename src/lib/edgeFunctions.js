@@ -107,6 +107,7 @@ export const requestPasswordReset = (supabase, email)                           
 export const verifyPasswordReset  = (supabase, email, otp, new_password)            => callFunction(supabase, 'verify-password-reset',   { email, otp, new_password });
 export const resetOtherPassword   = (supabase, target_admin_id, new_password)       => callFunction(supabase, 'reset-other-password',    { target_admin_id, new_password });
 export const deleteAdmin          = (supabase, target_admin_id)                     => callFunction(supabase, 'delete-admin',            { target_admin_id });
+export const fetchInbox = (supabase, mailbox_id) => callFunction(supabase, 'fetch-inbox', { mailbox_id });
 
 export const updateLicense = (supabase, expires_at, license_type, max_mailboxes) =>
   callFunction(supabase, 'update-license', { expires_at, license_type, max_mailboxes });
