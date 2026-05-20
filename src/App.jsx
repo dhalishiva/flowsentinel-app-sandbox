@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { Routes, Route, Navigate, Link, useNavigate, useLocation } from 'react-router-dom';
 import {
-  Users, LogOut, Activity, RefreshCw, Send,
+  Users, LogOut, Activity, RefreshCw, 
   Moon, Sun, History, User, Menu, Ticket, X, Clock,
   AlertTriangle, AlertOctagon,
 } from 'lucide-react';
@@ -177,7 +177,7 @@ function ProtectedShell() {
   const navItems = [
     { path: '/',        label: 'Mailboxes',     icon: Activity },
     { path: '/alerts',  label: 'Alert History', icon: History  },
-    { path: '/smtp',    label: 'SMTP',          icon: Send     },
+    // { path: '/smtp',    label: 'SMTP',          icon: Send     },
     { path: '/admins',  label: 'Admin Users',   icon: Users    },
     { path: '/profile', label: 'My Profile',    icon: User     },
     { path: '/support', label: 'Support',       icon: Ticket   },
