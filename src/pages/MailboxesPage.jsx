@@ -9,6 +9,7 @@ import TokenHealthBar from '../components/TokenHealthBar';
 import AddMailboxModal from '../components/AddMailboxModal';
 import RegenerateTokenModal from '../components/RegenerateTokenModal';
 import AlertConfigModal from '../components/AlertConfigModal';
+import { validateMailbox } from '../lib/edgeFunctions';
 
 export default function MailboxesPage() {
   const { supabase } = useAuth();
@@ -20,10 +21,16 @@ export default function MailboxesPage() {
   const [alertFor, setAlertFor]   = useState(null);
 
   // Confirm modals
-  const [deleteTarget, setDeleteTarget]   = useState(null);
+  const [deleteTarget, setDeleteTarget]     = useState(null);
   const [markDoneTarget, setMarkDoneTarget] = useState(null);
-  const [deleting, setDeleting]           = useState(false);
-  const [markingDone, setMarkingDone]     = useState(false);
+  const [deleting, setDeleting]             = useState(false);
+  const [markingDone, setMarkingDone]       = useState(false);
+
+  // Mark complete modal state
+  const [newRefreshToken, setNewRefreshToken] = useState('');
+  const [markDoneError, setMarkDoneError]     = useState('');
+  // 'idle' | 'validating' | 'saving' | 'done' | 'error'
+  const [markDoneStep, setMarkDoneStep]       = useState('idle');
 
   const load = async () => {
     setLoading(true);
@@ -35,39 +42,98 @@ export default function MailboxesPage() {
 
   useEffect(() => { load(); }, []);
 
-  // Update a single mailbox in local state without refetching
-const updateMailbox = (id, changes) => {
-  setMailboxes(prev => prev.map(mb => mb.id === id ? { ...mb, ...changes } : mb));
-};
+  const updateMailbox = (id, changes) => {
+    setMailboxes(prev => prev.map(mb => mb.id === id ? { ...mb, ...changes } : mb));
+  };
 
   const handleDelete = async () => {
-  setDeleting(true);
-  await supabase.from('mailboxes').delete().eq('id', deleteTarget.id);
-  // Remove from local state — no load()
-  setMailboxes(prev => prev.filter(mb => mb.id !== deleteTarget.id));
-  setDeleteTarget(null);
-  setDeleting(false);
-};
+    setDeleting(true);
+    await supabase.from('mailboxes').delete().eq('id', deleteTarget.id);
+    setMailboxes(prev => prev.filter(mb => mb.id !== deleteTarget.id));
+    setDeleteTarget(null);
+    setDeleting(false);
+  };
 
+  // ── Mark as regenerated ───────────────────────────────────────────────────
+  // Step 1: validate new token against Microsoft using existing tenant_id + client_id
+  // Step 2: only if valid, save to DB and reset the 90-day timer
   const handleMarkRegenerated = async () => {
-  setMarkingDone(true);
-  const now = new Date().toISOString();
-  await supabase.from('mailboxes').update({
-    token_generated_at: now,
-    trigger_completed:  true,
-    token_expires_at:   null,
-    token_expiry_type:  'auto',
-  }).eq('id', markDoneTarget.id);
-  // Update local state — no load()
-  updateMailbox(markDoneTarget.id, {
-    token_generated_at: now,
-    trigger_completed:  true,
-    token_expires_at:   null,
-    token_expiry_type:  'auto',
-  });
-  setMarkDoneTarget(null);
-  setMarkingDone(false);
-};
+    setMarkDoneError('');
+
+    const token = newRefreshToken.trim();
+    if (!token) {
+      setMarkDoneError('Please paste the new refresh token before confirming.');
+      return;
+    }
+
+    setMarkingDone(true);
+
+    // ── Step 1: Validate with Microsoft ──────────────────────────────────
+    setMarkDoneStep('validating');
+    try {
+      await validateMailbox(
+        supabase,
+        markDoneTarget.tenant_id,
+        markDoneTarget.client_id,
+        token,
+      );
+    } catch (err) {
+      setMarkDoneError(`Token validation failed: ${err.message}`);
+      setMarkDoneStep('error');
+      setMarkingDone(false);
+      return;
+    }
+
+    // ── Step 2: Save to DB ────────────────────────────────────────────────
+    setMarkDoneStep('saving');
+    const now = new Date().toISOString();
+
+    const { error: dbErr } = await supabase.from('mailboxes').update({
+      refresh_token:      token,
+      token_generated_at: now,
+      trigger_completed:  true,
+      token_expires_at:   null,
+      token_expiry_type:  'auto',
+      status:             'active',
+      last_error:         null,
+    }).eq('id', markDoneTarget.id);
+
+    if (dbErr) {
+      setMarkDoneError(`Failed to save: ${dbErr.message}`);
+      setMarkDoneStep('error');
+      setMarkingDone(false);
+      return;
+    }
+
+    updateMailbox(markDoneTarget.id, {
+      refresh_token:      token,
+      token_generated_at: now,
+      trigger_completed:  true,
+      token_expires_at:   null,
+      token_expiry_type:  'auto',
+      status:             'active',
+      last_error:         null,
+    });
+
+    setMarkDoneStep('done');
+    setMarkingDone(false);
+  };
+
+  const handleMarkDoneClose = () => {
+    setMarkDoneTarget(null);
+    setNewRefreshToken('');
+    setMarkDoneError('');
+    setMarkDoneStep('idle');
+  };
+
+  // Step label for the button
+  const markDoneButtonLabel = () => {
+    switch (markDoneStep) {
+      case 'validating': return <><RefreshCw className="animate-spin" size={14} /> Validating token...</>;
+      case 'saving':     return <><RefreshCw className="animate-spin" size={14} /> Saving...</>;
+      default:           return <><CheckCircle size={14} /> Confirm</>;
+    }
+  };
 
   return (
     <div className="p-4 md:p-6 max-w-6xl mx-auto">
@@ -156,7 +222,12 @@ const updateMailbox = (id, changes) => {
                   title="Edit mailbox">
                   <Edit2 size={15} />
                 </button>
-                <button onClick={() => setMarkDoneTarget(mb)}
+                <button onClick={() => {
+                  setMarkDoneTarget(mb);
+                  setNewRefreshToken('');
+                  setMarkDoneError('');
+                  setMarkDoneStep('idle');
+                }}
                   className="px-3 py-2 hover:bg-emerald-50 dark:hover:bg-emerald-900/20 text-emerald-600 dark:text-emerald-400 rounded-lg"
                   title="Mark token as regenerated">
                   <CheckCircle size={15} />
@@ -204,34 +275,89 @@ const updateMailbox = (id, changes) => {
         </div>
       )}
 
-      {/* ── Mark as regenerated confirmation modal ── */}
+      {/* ── Mark as regenerated modal ── */}
       {markDoneTarget && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4">
           <div className="bg-white dark:bg-slate-900 rounded-2xl shadow-2xl w-full max-w-sm p-6">
-            <div className="flex items-center justify-center h-12 w-12 rounded-full bg-emerald-100 dark:bg-emerald-900/30 mx-auto mb-4">
-              <CheckCircle size={20} className="text-emerald-600 dark:text-emerald-400" />
-            </div>
-            <h3 className="font-semibold text-slate-900 dark:text-white text-center mb-2">Mark as regenerated?</h3>
-            <p className="text-sm text-slate-500 dark:text-slate-400 text-center mb-4">
-              This resets the 90-day token timer and stops expiry alerts for{' '}
-              <strong className="text-slate-700 dark:text-slate-300">{markDoneTarget.email}</strong>.
-            </p>
-            <div className="bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded-lg p-3 mb-5">
-              <p className="text-xs text-amber-800 dark:text-amber-300 text-center">
-                Only use this if you have already updated the token in ReadSoft's backend config.
-              </p>
-            </div>
-            <div className="flex gap-3">
-              <button onClick={() => setMarkDoneTarget(null)} disabled={markingDone}
-                className="flex-1 py-2.5 border border-slate-300 dark:border-slate-700 text-slate-600 dark:text-slate-400 rounded-lg hover:bg-slate-50 dark:hover:bg-slate-800 text-sm font-medium disabled:opacity-50">
-                Cancel
-              </button>
-              <button onClick={handleMarkRegenerated} disabled={markingDone}
-                className="flex-1 py-2.5 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 disabled:opacity-50 text-sm font-medium flex items-center justify-center gap-2">
-                {markingDone ? <RefreshCw className="animate-spin" size={14} /> : <CheckCircle size={14} />}
-                {markingDone ? 'Saving...' : 'Confirm'}
-              </button>
-            </div>
+
+            {/* Success state */}
+            {markDoneStep === 'done' ? (
+              <>
+                <div className="flex items-center justify-center h-12 w-12 rounded-full bg-emerald-100 dark:bg-emerald-900/30 mx-auto mb-4">
+                  <CheckCircle size={20} className="text-emerald-600 dark:text-emerald-400" />
+                </div>
+                <h3 className="font-semibold text-slate-900 dark:text-white text-center mb-2">
+                  Token updated successfully
+                </h3>
+                <p className="text-sm text-slate-500 dark:text-slate-400 text-center mb-6">
+                  The new refresh token has been validated and saved.
+                  The 90-day timer has been reset.
+                </p>
+                <button onClick={handleMarkDoneClose}
+                  className="w-full py-2.5 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 text-sm font-medium">
+                  Done
+                </button>
+              </>
+            ) : (
+              <>
+                <div className="flex items-center justify-center h-12 w-12 rounded-full bg-emerald-100 dark:bg-emerald-900/30 mx-auto mb-4">
+                  <CheckCircle size={20} className="text-emerald-600 dark:text-emerald-400" />
+                </div>
+                <h3 className="font-semibold text-slate-900 dark:text-white text-center mb-2">
+                  Mark token as regenerated
+                </h3>
+                <p className="text-sm text-slate-500 dark:text-slate-400 text-center mb-4">
+                  Paste the new refresh token for{' '}
+                  <strong className="text-slate-700 dark:text-slate-300">
+                    {markDoneTarget.email}
+                  </strong>.
+                  We'll verify it with Microsoft before saving.
+                </p>
+
+                {/* Token input */}
+                <div className="mb-4">
+                  <label className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1.5">
+                    New refresh token
+                  </label>
+                  <textarea
+                    rows={3}
+                    value={newRefreshToken}
+                    onChange={e => { setNewRefreshToken(e.target.value); setMarkDoneError(''); }}
+                    placeholder="Paste new refresh token here..."
+                    disabled={markingDone}
+                    className="w-full px-3 py-2 border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 dark:text-white rounded-lg outline-none focus:ring-2 focus:ring-emerald-500 text-xs font-mono resize-none disabled:opacity-50"
+                  />
+                </div>
+
+                <div className="bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded-lg p-3 mb-4">
+                  <p className="text-xs text-amber-800 dark:text-amber-300 text-center">
+                    Only confirm if you have already updated the token in
+                    ReadSoft's backend config and restarted Tomcat.
+                  </p>
+                </div>
+
+                {markDoneError && (
+                  <div className="mb-4 p-3 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg">
+                    <p className="text-xs text-red-600 dark:text-red-400 text-center">
+                      {markDoneError}
+                    </p>
+                  </div>
+                )}
+
+                <div className="flex gap-3">
+                  <button onClick={handleMarkDoneClose} disabled={markingDone}
+                    className="flex-1 py-2.5 border border-slate-300 dark:border-slate-700 text-slate-600 dark:text-slate-400 rounded-lg hover:bg-slate-50 dark:hover:bg-slate-800 text-sm font-medium disabled:opacity-50">
+                    Cancel
+                  </button>
+                  <button
+                    onClick={handleMarkRegenerated}
+                    disabled={markingDone || !newRefreshToken.trim()}
+                    className="flex-1 py-2.5 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 disabled:opacity-50 text-sm font-medium flex items-center justify-center gap-2">
+                    {markDoneButtonLabel()}
+                  </button>
+                </div>
+              </>
+            )}
           </div>
         </div>
       )}
